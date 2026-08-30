@@ -1,0 +1,29 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Project specifics
+models/checkpoints/*.pt
+data/*.npz
+data/self_play/
+data/*.bin
+build/
+dist/
+*.spec
+chess_bot_colab.ipynb
+
+# IDEs and OS files
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
