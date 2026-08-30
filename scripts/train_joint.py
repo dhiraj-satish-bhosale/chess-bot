@@ -29,7 +29,7 @@ from engine.board_encoder import encode_board_v2
 from engine.move_encoding import move_to_index
 from models.network import ChessValueNet, count_parameters
 
-CP_SCALE = 100.0  # Scale centipawns for tanh
+CP_SCALE = 400.0  # Scale centipawns for tanh
 
 class JointDataset(Dataset):
     def __init__(self, npz_paths):

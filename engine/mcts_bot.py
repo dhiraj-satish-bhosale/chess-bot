@@ -54,7 +54,19 @@ class MCTSBot:
         """
         sims = simulations or self.simulations
 
-        root = self.mcts.search(board, num_simulations=sims, add_noise=add_noise)
+        # Safe tree reuse logic: only reuse if node was expanded and has children
+        root = None
+        if self._last_root is not None and len(board.move_stack) > 0:
+            last_move = board.move_stack[-1]
+            temp = board.copy()
+            temp.pop()
+            if temp.fen() == self._last_board_fen and last_move in self._last_root.children:
+                candidate = self._last_root.children[last_move]
+                if candidate.is_expanded and len(candidate.children) > 0:
+                    root = candidate
+                    root.parent = None
+
+        root = self.mcts.search(board, num_simulations=sims, root=root, add_noise=add_noise)
 
         # Extract info
         move = self.mcts.select_move(root, temperature=temperature)
@@ -64,8 +76,14 @@ class MCTSBot:
         root_value = root.q_value
 
         # Store for potential tree reuse
-        self._last_root = root
-        self._last_board_fen = board.fen()
+        if move and move in root.children:
+            self._last_root = root.children[move]
+            temp = board.copy()
+            temp.push(move)
+            self._last_board_fen = temp.fen()
+        else:
+            self._last_root = None
+            self._last_board_fen = None
 
         return move, visit_counts, root_value
 
@@ -87,56 +105,35 @@ class MCTSBot:
         Returns:
             (move, root_value, simulations_done)
         """
-        deadline = time.time() + max(0.05, time_budget)
+        # Safe tree reuse logic: only reuse if node was expanded and has children
+        root = None
+        if self._last_root is not None and len(board.move_stack) > 0:
+            last_move = board.move_stack[-1]
+            temp = board.copy()
+            temp.pop()
+            if temp.fen() == self._last_board_fen and last_move in self._last_root.children:
+                candidate = self._last_root.children[last_move]
+                if candidate.is_expanded and len(candidate.children) > 0:
+                    root = candidate
+                    root.parent = None
 
-        from engine.board_encoder import encode_board_v2
-        from engine.move_encoding import get_legal_move_indices
-
-        root = _MCTSNodeForTimed()
-
-        # Evaluate and expand root
-        policy_logits, root_value = self.mcts._evaluate(board)
-        root.expand(policy_logits, board)
-
-        if add_noise:
-            root.add_dirichlet_noise()
-
-        if not root.children:
-            # No legal moves
-            legal = list(board.legal_moves)
-            return (legal[0] if legal else None), 0.0, 0
-
-        sims_done = 0
-        while sims_done < max_simulations and time.time() < deadline:
-            # Run a batch of simulations
-            batch_size = min(32, max_simulations - sims_done)
-            for _ in range(batch_size):
-                node = root
-                sim_board = board.copy()
-
-                # Selection
-                while not node.is_leaf() and node.children:
-                    node = node.select_child(self.mcts.c_puct)
-                    sim_board.push(node.move)
-
-                # Evaluation & Expansion
-                if sim_board.is_game_over():
-                    if sim_board.is_checkmate():
-                        value = -1.0
-                    else:
-                        value = 0.0
-                else:
-                    policy_logits, value = self.mcts._evaluate(sim_board)
-                    node.expand(policy_logits, sim_board)
-
-                # Backpropagation
-                node.backpropagate(value)
-                sims_done += 1
-
-            if time.time() >= deadline:
-                break
+        root, sims_done = self.mcts.search_timed(
+            board, time_budget=time_budget, max_simulations=max_simulations,
+            root=root, add_noise=add_noise
+        )
 
         move = self.mcts.select_move(root, temperature=temperature)
+
+        # Store for potential tree reuse
+        if move and move in root.children:
+            self._last_root = root.children[move]
+            temp = board.copy()
+            temp.push(move)
+            self._last_board_fen = temp.fen()
+        else:
+            self._last_root = None
+            self._last_board_fen = None
+
         return move, root.q_value, sims_done
 
     def get_principal_variation(self, root, board: chess.Board, max_depth: int = 10) -> list:

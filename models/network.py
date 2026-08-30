@@ -79,14 +79,12 @@ class ChessValueNet(nn.Module):
         # Value head
         self.value_conv = nn.Conv2d(channels, 8, 1, bias=False)
         self.value_bn = nn.BatchNorm2d(8)
-        self.value_dropout = nn.Dropout(0.1)
         self.value_fc1 = nn.Linear(8 * 8 * 8, 256)
         self.value_fc2 = nn.Linear(256, 1)
 
         # Policy head (always initialized so weights can be loaded, but only used if output_policy=True)
         self.policy_conv = nn.Conv2d(channels, NUM_MOVE_PLANES, 1, bias=False)
         self.policy_bn = nn.BatchNorm2d(NUM_MOVE_PLANES)
-        self.policy_dropout = nn.Dropout(0.1)
 
     def forward(self, x):
         x = self.stem(x)
@@ -95,7 +93,6 @@ class ChessValueNet(nn.Module):
         # Value path
         v = F.relu(self.value_bn(self.value_conv(x)))
         v = v.flatten(1)
-        v = self.value_dropout(v)
         v = F.relu(self.value_fc1(v))
         v = torch.tanh(self.value_fc2(v)).squeeze(-1)  # (batch,)
 
@@ -105,7 +102,6 @@ class ChessValueNet(nn.Module):
         # Policy path
         p = F.relu(self.policy_bn(self.policy_conv(x)))
         p = p.flatten(1)  # (batch, 4672)
-        p = self.policy_dropout(p)
         return p, v
 
     @torch.no_grad()

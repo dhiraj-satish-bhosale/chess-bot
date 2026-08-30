@@ -360,6 +360,8 @@ def train_iteration(
                         policy_logits, value_pred, policies, values
                     )
                 scaler.scale(total_loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
                 scaler.step(optimizer)
                 scaler.update()
             else:
@@ -368,6 +370,7 @@ def train_iteration(
                     policy_logits, value_pred, policies, values
                 )
                 total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
                 optimizer.step()
 
             total_loss_sum += total_loss.item()
@@ -514,9 +517,12 @@ def main():
 
         # --- Adjust learning rate ---
         current_lr = args.lr
-        for milestone in lr_milestones:
-            if iteration >= milestone:
-                current_lr /= 10.0
+        if iteration < 3:
+            current_lr /= 10.0  # Warmup
+        else:
+            for milestone in lr_milestones:
+                if iteration >= milestone:
+                    current_lr /= 10.0
         for param_group in optimizer.param_groups:
             param_group["lr"] = current_lr
         print(f"Learning rate: {current_lr:.6f}")

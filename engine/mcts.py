@@ -35,7 +35,7 @@ class MCTSNode:
 
     __slots__ = [
         "parent", "move", "prior", "visit_count", "total_value",
-        "children", "is_expanded", "board_hash",
+        "children", "is_expanded", "board_hash", "virtual_loss"
     ]
 
     def __init__(self, parent=None, move=None, prior: float = 0.0):
@@ -47,6 +47,7 @@ class MCTSNode:
         self.children = {}            # {chess.Move: MCTSNode}
         self.is_expanded = False
         self.board_hash = None
+        self.virtual_loss = 0
 
     @property
     def q_value(self) -> float:
@@ -57,6 +58,12 @@ class MCTSNode:
 
     def is_leaf(self) -> bool:
         return not self.is_expanded
+
+    def add_virtual_loss(self, loss_val: int = 1):
+        self.virtual_loss += loss_val
+
+    def revert_virtual_loss(self, loss_val: int = 1):
+        self.virtual_loss -= loss_val
 
     def select_child(self, c_puct: float) -> "MCTSNode":
         """Select the child with the highest PUCT score.
@@ -70,7 +77,6 @@ class MCTSNode:
         best_child = None
 
         for child in self.children.values():
-            # PUCT formula — negate Q because it's from opponent's perspective
             u = c_puct * child.prior * sqrt_total / (1 + child.visit_count)
             score = -child.q_value + u
             if score > best_score:
@@ -197,26 +203,14 @@ class MCTS:
                [float(values[i]) for i in range(len(boards))]
 
     def search(self, board: chess.Board, num_simulations: int,
-               add_noise: bool = True) -> MCTSNode:
-        """Run MCTS for num_simulations iterations from the given position.
-
-        Args:
-            board: The current chess position.
-            num_simulations: Number of MCTS simulations to run.
-            add_noise: Whether to add Dirichlet noise at the root (True
-                       during self-play training, False during play).
-
-        Returns:
-            The root MCTSNode with visit counts for each child.
-        """
-        root = MCTSNode()
-
-        # Evaluate root and expand
-        policy_logits, root_value = self._evaluate(board)
-        root.expand(policy_logits, board)
-
-        if add_noise:
-            root.add_dirichlet_noise(self.dirichlet_alpha, self.dirichlet_epsilon)
+               root: MCTSNode = None, add_noise: bool = True) -> MCTSNode:
+        """Run MCTS for num_simulations iterations from the given position."""
+        if root is None or not root.is_expanded or not root.children:
+            root = MCTSNode()
+            policy_logits, root_value = self._evaluate(board)
+            root.expand(policy_logits, board)
+            if add_noise:
+                root.add_dirichlet_noise(self.dirichlet_alpha, self.dirichlet_epsilon)
 
         if not root.children:
             return root  # no legal moves (game over at root)
@@ -234,11 +228,8 @@ class MCTS:
             if sim_board.is_game_over():
                 # Terminal node: use true game result
                 if sim_board.is_checkmate():
-                    # The side that just moved delivered checkmate.
-                    # From the current side-to-move's perspective, this is -1.
                     value = -1.0
                 else:
-                    # Draw
                     value = 0.0
             elif self.tablebase and len(sim_board.piece_map()) <= 5:
                 try:
@@ -255,6 +246,142 @@ class MCTS:
             # --- Backpropagation ---
             node.backpropagate(value)
 
+        return root
+
+    def search_timed(self, board: chess.Board, time_budget: float,
+                     max_simulations: int = 3200, root: MCTSNode = None,
+                     add_noise: bool = False) -> tuple:
+        """Run MCTS within a time budget.
+        
+        Returns:
+            (root_node, simulations_completed)
+        """
+        deadline = time.time() + max(0.05, time_budget)
+        
+        if root is None or not root.is_expanded or not root.children:
+            root = MCTSNode()
+            policy_logits, root_value = self._evaluate(board)
+            root.expand(policy_logits, board)
+            if add_noise:
+                root.add_dirichlet_noise(self.dirichlet_alpha, self.dirichlet_epsilon)
+
+        if not root.children:
+            return root, 0
+
+        sims_done = 0
+        while sims_done < max_simulations and time.time() < deadline:
+            node = root
+            sim_board = board.copy()
+
+            # Selection
+            while not node.is_leaf() and node.children:
+                node = node.select_child(self.c_puct)
+                sim_board.push(node.move)
+
+            # Evaluation & Expansion
+            if sim_board.is_game_over():
+                if sim_board.is_checkmate():
+                    value = -1.0
+                else:
+                    value = 0.0
+            elif self.tablebase and len(sim_board.piece_map()) <= 5:
+                try:
+                    wdl = self.tablebase.probe_wdl(sim_board)
+                    value = 1.0 if wdl > 0 else (-1.0 if wdl < 0 else 0.0)
+                except Exception:
+                    policy_logits, value = self._evaluate(sim_board)
+                    node.expand(policy_logits, sim_board)
+            else:
+                policy_logits, value = self._evaluate(sim_board)
+                node.expand(policy_logits, sim_board)
+
+            # Backpropagation
+            node.backpropagate(value)
+            sims_done += 1
+
+        return root, sims_done
+
+    def search_batched(self, board: chess.Board, num_simulations: int,
+                       batch_size: int = 8, add_noise: bool = True) -> MCTSNode:
+        """Run MCTS with batched neural network evaluation."""
+        root = MCTSNode()
+        
+        # Evaluate root and expand
+        policy_logits, root_value = self._evaluate(board)
+        root.expand(policy_logits, board)
+
+        if add_noise:
+            root.add_dirichlet_noise(self.dirichlet_alpha, self.dirichlet_epsilon)
+
+        if not root.children:
+            return root  # no legal moves
+
+        sims_done = 0
+        while sims_done < num_simulations:
+            current_batch_size = min(batch_size, num_simulations - sims_done)
+            leaves = []
+            boards = []
+            
+            # --- Selection (collecting a batch of leaves) ---
+            for _ in range(current_batch_size):
+                node = root
+                sim_board = board.copy()
+                path = []
+                
+                while not node.is_leaf() and node.children:
+                    node = node.select_child(self.c_puct)
+                    path.append(node)
+                    sim_board.push(node.move)
+                
+                # Apply virtual loss to the path to discourage other threads/sims from picking it
+                for n in path:
+                    n.add_virtual_loss()
+                
+                leaves.append((node, path))
+                boards.append(sim_board)
+                
+            # --- Evaluation & Expansion ---
+            # Separate terminal and non-terminal states
+            eval_boards = []
+            eval_indices = []
+            terminal_values = []
+            
+            for i, sim_board in enumerate(boards):
+                node, _ = leaves[i]
+                if sim_board.is_game_over():
+                    val = -1.0 if sim_board.is_checkmate() else 0.0
+                    terminal_values.append((i, val))
+                elif self.tablebase and len(sim_board.piece_map()) <= 5:
+                    try:
+                        wdl = self.tablebase.probe_wdl(sim_board)
+                        val = 1.0 if wdl > 0 else (-1.0 if wdl < 0 else 0.0)
+                        terminal_values.append((i, val))
+                    except Exception:
+                        eval_boards.append(sim_board)
+                        eval_indices.append(i)
+                else:
+                    eval_boards.append(sim_board)
+                    eval_indices.append(i)
+                    
+            # Batch evaluate all non-terminal nodes
+            policy_list, value_list = self._evaluate_batch(eval_boards)
+            
+            # --- Backpropagation ---
+            for j, (i, val) in enumerate(terminal_values):
+                node, path = leaves[i]
+                for n in path:
+                    n.revert_virtual_loss()
+                node.backpropagate(val)
+                sims_done += 1
+                
+            for j, i in enumerate(eval_indices):
+                node, path = leaves[i]
+                for n in path:
+                    n.revert_virtual_loss()
+                node.expand(policy_list[j], boards[i])
+                node.backpropagate(value_list[j])
+                sims_done += 1
+                
         return root
 
     def get_policy(self, root: MCTSNode, temperature: float = 1.0) -> tuple:
