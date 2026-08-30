@@ -18,7 +18,7 @@ The bot has achieved an Elo rating of **~1900+** playing in live environments an
 👀 **See it in action on Lichess:** [@dhirajbhosale](https://lichess.org/@/dhirajbhosale)
 
 ### ✨ Features
-- **AlphaZero Architecture:** Dual-head Residual CNN (~4.5M parameters).
+- **AlphaZero Architecture:** Dual-head Residual CNN (~4.6M parameters).
 - **MCTS Search Engine:** PUCT-based Monte Carlo Tree Search for deep, dynamic calculations.
 - **Self-Play RL Pipeline:** Full infrastructure to train the bot via self-play reinforcement learning, complete with arena gating.
 - **UCI Protocol Support:** Works seamlessly with standard chess GUIs.
@@ -47,8 +47,8 @@ Instead of classic Alpha-Beta pruning, the bot uses PUCT MCTS:
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/your-username/alphazero-chess-bot.git
-   cd alphazero-chess-bot
+   git clone https://github.com/dhiraj-satish-bhosale/chess-bot.git
+   cd chess-bot
    ```
 
 2. **Install requirements:**
