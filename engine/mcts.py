@@ -18,6 +18,7 @@ Key concepts:
                 ensure exploration during self-play training.
 """
 import os
+import time
 import math
 import numpy as np
 import chess
