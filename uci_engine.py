@@ -58,11 +58,13 @@ def log(msg):
 
 
 def main():
-    bot = None
     board = chess.Board()
     simulations = DEFAULT_SIMULATIONS
     book_path = DEFAULT_BOOK_PATH
     syzygy_path = DEFAULT_SYZYGY_PATH
+
+    # Pre-load bot on startup so isready / ping is instantaneous
+    bot = _init_bot(simulations, syzygy_path)
 
     for line in sys.stdin:
         line = line.strip()
@@ -85,6 +87,8 @@ def main():
                 try:
                     idx = parts.index("value")
                     simulations = int(parts[idx + 1])
+                    if bot is not None:
+                        bot.simulations = simulations
                 except (ValueError, IndexError):
                     pass
             elif "BookFile" in parts:
@@ -101,12 +105,16 @@ def main():
                     pass
 
         elif line == "isready":
-            bot = _init_bot(simulations, syzygy_path)
+            if bot is None:
+                bot = _init_bot(simulations, syzygy_path)
             print("readyok")
             sys.stdout.flush()
 
         elif line == "ucinewgame":
             board = chess.Board()
+            if bot is not None:
+                bot._last_root = None
+                bot._last_board_fen = None
 
         elif line.startswith("position"):
             board = _parse_position(line)
@@ -177,10 +185,12 @@ def _init_bot(simulations: int, syzygy_path: str = None):
     from engine.mcts_bot import MCTSBot
     log(f"Loading AlphaZero model from {checkpoint} ...")
     bot = MCTSBot(checkpoint, simulations=simulations, tablebase_path=syzygy_path)
-    # Warmup
-    log("Warming up model...")
-    bot.choose_move_timed(chess.Board(), time_budget=0.1, max_simulations=10)
-    log("AlphaZero model loaded and warmed up.")
+    # Fast warmup
+    import torch
+    dummy = torch.zeros(1, 21, 8, 8, device=bot.device)
+    with torch.no_grad():
+        bot.net(dummy)
+    log("AlphaZero model loaded and ready.")
 
     _cached_bot = bot
     return bot
