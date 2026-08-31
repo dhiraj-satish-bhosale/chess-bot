@@ -57,15 +57,27 @@ def log(msg):
     print(msg, file=sys.stderr, flush=True)
 
 
-import threading
+_cached_bot = None
 
-_init_thread = None
 
-def _start_async_init(simulations: int, syzygy_path: str = None):
-    global _init_thread
-    if _init_thread is None:
-        _init_thread = threading.Thread(target=_init_bot, args=(simulations, syzygy_path), daemon=True)
-        _init_thread.start()
+def _init_bot(simulations: int, syzygy_path: str = None):
+    global _cached_bot
+
+    if _cached_bot is not None:
+        return _cached_bot
+
+    checkpoint = ALPHAZERO_CHECKPOINT
+    if not os.path.exists(checkpoint):
+        log(f"AlphaZero checkpoint not found at {checkpoint}")
+        return None
+
+    from engine.mcts_bot import MCTSBot
+    log(f"Loading AlphaZero model from {checkpoint} ...")
+    bot = MCTSBot(checkpoint, simulations=simulations, tablebase_path=syzygy_path)
+    log("AlphaZero model loaded and ready.")
+
+    _cached_bot = bot
+    return bot
 
 
 def main():
@@ -74,9 +86,6 @@ def main():
     simulations = DEFAULT_SIMULATIONS
     book_path = DEFAULT_BOOK_PATH
     syzygy_path = DEFAULT_SYZYGY_PATH
-
-    # Start background model loading immediately
-    _start_async_init(simulations, syzygy_path)
 
     for line in sys.stdin:
         line = line.strip()
@@ -117,11 +126,7 @@ def main():
                     pass
 
         elif line == "isready":
-            if _init_thread is not None:
-                _init_thread.join()
-            bot = _cached_bot
-            if bot is None:
-                bot = _init_bot(simulations, syzygy_path)
+            bot = _init_bot(simulations, syzygy_path)
             print("readyok")
             sys.stdout.flush()
 
@@ -181,34 +186,6 @@ def main():
 
         elif line == "ponderhit":
             pass  # pondering not implemented
-
-
-_cached_bot = None
-
-
-def _init_bot(simulations: int, syzygy_path: str = None):
-    global _cached_bot
-
-    if _cached_bot is not None:
-        return _cached_bot
-
-    checkpoint = ALPHAZERO_CHECKPOINT
-    if not os.path.exists(checkpoint):
-        log(f"AlphaZero checkpoint not found at {checkpoint}")
-        return None
-
-    from engine.mcts_bot import MCTSBot
-    log(f"Loading AlphaZero model from {checkpoint} ...")
-    bot = MCTSBot(checkpoint, simulations=simulations, tablebase_path=syzygy_path)
-    # Fast warmup
-    import torch
-    dummy = torch.zeros(1, 21, 8, 8, device=bot.device)
-    with torch.no_grad():
-        bot.net(dummy)
-    log("AlphaZero model loaded and ready.")
-
-    _cached_bot = bot
-    return bot
 
 
 def _compute_time_budget(go_line: str, white_to_move: bool) -> float:
