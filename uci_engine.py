@@ -57,14 +57,26 @@ def log(msg):
     print(msg, file=sys.stderr, flush=True)
 
 
+import threading
+
+_init_thread = None
+
+def _start_async_init(simulations: int, syzygy_path: str = None):
+    global _init_thread
+    if _init_thread is None:
+        _init_thread = threading.Thread(target=_init_bot, args=(simulations, syzygy_path), daemon=True)
+        _init_thread.start()
+
+
 def main():
+    bot = None
     board = chess.Board()
     simulations = DEFAULT_SIMULATIONS
     book_path = DEFAULT_BOOK_PATH
     syzygy_path = DEFAULT_SYZYGY_PATH
 
-    # Pre-load bot on startup so isready / ping is instantaneous
-    bot = _init_bot(simulations, syzygy_path)
+    # Start background model loading immediately
+    _start_async_init(simulations, syzygy_path)
 
     for line in sys.stdin:
         line = line.strip()
@@ -87,8 +99,8 @@ def main():
                 try:
                     idx = parts.index("value")
                     simulations = int(parts[idx + 1])
-                    if bot is not None:
-                        bot.simulations = simulations
+                    if _cached_bot is not None:
+                        _cached_bot.simulations = simulations
                 except (ValueError, IndexError):
                     pass
             elif "BookFile" in parts:
@@ -105,6 +117,9 @@ def main():
                     pass
 
         elif line == "isready":
+            if _init_thread is not None:
+                _init_thread.join()
+            bot = _cached_bot
             if bot is None:
                 bot = _init_bot(simulations, syzygy_path)
             print("readyok")
