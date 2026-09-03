@@ -27,7 +27,7 @@ class MCTSBot:
     def __init__(self, checkpoint_path: str, simulations: int = 800,
                  c_puct: float = 2.5, device=None, tablebase_path: str = None):
         self.device = device or torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
+            "cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 0 else "cpu"
         )
         self.net = load_model(checkpoint_path, self.device, output_policy=True)
         self.simulations = simulations

@@ -13,7 +13,7 @@ env.bak/
 venv.bak/
 
 # Project specifics
-models/checkpoints/*.pt
+# models/checkpoints/*.pt
 data/*.npz
 data/self_play/
 data/*.bin

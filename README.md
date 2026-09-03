@@ -133,9 +133,15 @@ chess_bot/
 │   └── checkpoints/            # Pre-trained weights (.pt files)
 ├── scripts/                    
 │   ├── benchmark_elo.py        # Rating estimation tools
+│   ├── eval_suite.py           # Comprehensive evaluation suite
 │   ├── evaluate.py             # Match and Stockfish testing engine
+│   ├── generate_opening_book.py# Opening book generator for evaluation
+│   ├── match_eval.py           # Evaluates matches and updates ELO
 │   └── train_joint.py          # Supervised distillation script
 ├── play.py                     # CLI Interactive Play
+├── resume_training.ps1         # PowerShell script to resume RL training
+├── run_bot.sh                  # Shell script to run Lichess bot
+├── self_play.py                # Standalone Self-Play data generation
 ├── train_rl.py                 # Full AlphaZero Self-Play loop
 └── uci_engine.py               # UCI Protocol entry point
 ```

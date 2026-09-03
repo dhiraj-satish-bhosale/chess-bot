@@ -127,8 +127,8 @@ def count_parameters(model: nn.Module) -> int:
 
 def load_model(checkpoint_path: str, device=None, output_policy: bool = False) -> ChessValueNet:
     """Helper to load a checkpoint."""
-    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    device = device or torch.device("cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 0 else "cpu")
+    ckpt = torch.load(checkpoint_path, map_location=str(device), weights_only=False)
     net = ChessValueNet(
         channels=ckpt.get("channels", 128),
         num_res_blocks=ckpt.get("num_res_blocks", 15),

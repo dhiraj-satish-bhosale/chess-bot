@@ -41,8 +41,8 @@ import chess
 import chess.polyglot
 import chess.syzygy
 
-# Default checkpoint path
-ALPHAZERO_CHECKPOINT = os.path.join(SCRIPT_DIR, "models", "checkpoints", "alphazero_distilled.pt")
+TARGET_CHECKPOINT = os.path.join(SCRIPT_DIR, "models", "checkpoints", "alphazero_distilled.pt")
+ALPHAZERO_CHECKPOINT = TARGET_CHECKPOINT
 
 DEFAULT_SIMULATIONS = 800
 
@@ -58,15 +58,16 @@ def log(msg):
 
 
 _cached_bot = None
+_cached_checkpoint = None
 
 
-def _init_bot(simulations: int, syzygy_path: str = None):
-    global _cached_bot
+def _init_bot(simulations: int, syzygy_path: str = None, checkpoint: str = None):
+    global _cached_bot, _cached_checkpoint
 
-    if _cached_bot is not None:
+    checkpoint = checkpoint or ALPHAZERO_CHECKPOINT
+    if _cached_bot is not None and _cached_checkpoint == checkpoint:
         return _cached_bot
 
-    checkpoint = ALPHAZERO_CHECKPOINT
     if not os.path.exists(checkpoint):
         log(f"AlphaZero checkpoint not found at {checkpoint}")
         return None
@@ -74,9 +75,15 @@ def _init_bot(simulations: int, syzygy_path: str = None):
     from engine.mcts_bot import MCTSBot
     log(f"Loading AlphaZero model from {checkpoint} ...")
     bot = MCTSBot(checkpoint, simulations=simulations, tablebase_path=syzygy_path)
-    log("AlphaZero model loaded and ready.")
+    # Warm up CUDA kernels so there is zero initial latency during games
+    try:
+        bot.choose_move(chess.Board(), simulations=2)
+    except Exception:
+        pass
+    log(f"AlphaZero model loaded and warmed up on {bot.device}.")
 
     _cached_bot = bot
+    _cached_checkpoint = checkpoint
     return bot
 
 
@@ -86,6 +93,7 @@ def main():
     simulations = DEFAULT_SIMULATIONS
     book_path = DEFAULT_BOOK_PATH
     syzygy_path = DEFAULT_SYZYGY_PATH
+    checkpoint_path = ALPHAZERO_CHECKPOINT
 
     for line in sys.stdin:
         line = line.strip()
@@ -96,6 +104,7 @@ def main():
             print("id name AlphaZeroChessBot")
             print("id author Niraj")
             print(f"option name Simulations type spin default {DEFAULT_SIMULATIONS} min 50 max 10000")
+            print(f"option name Checkpoint type string default {ALPHAZERO_CHECKPOINT}")
             print(f"option name BookFile type string default {DEFAULT_BOOK_PATH}")
             print(f"option name SyzygyPath type string default {DEFAULT_SYZYGY_PATH}")
             print("uciok")
@@ -112,6 +121,15 @@ def main():
                         _cached_bot.simulations = simulations
                 except (ValueError, IndexError):
                     pass
+            elif "Checkpoint" in parts:
+                try:
+                    idx = parts.index("value")
+                    new_ckpt = " ".join(parts[idx + 1:])
+                    if new_ckpt != checkpoint_path:
+                        checkpoint_path = new_ckpt
+                        bot = _init_bot(simulations, syzygy_path, checkpoint=checkpoint_path)
+                except (ValueError, IndexError):
+                    pass
             elif "BookFile" in parts:
                 try:
                     idx = parts.index("value")
@@ -126,7 +144,6 @@ def main():
                     pass
 
         elif line == "isready":
-            bot = _init_bot(simulations, syzygy_path)
             print("readyok")
             sys.stdout.flush()
 
@@ -140,8 +157,6 @@ def main():
             board = _parse_position(line)
 
         elif line.startswith("go"):
-            if bot is None:
-                bot = _init_bot(simulations, syzygy_path)
 
             # 1. Check PolyGlot Opening Book for instant move (0.0s)
             book_move = None
@@ -158,6 +173,9 @@ def main():
                 print(f"bestmove {book_move.uci()}")
                 sys.stdout.flush()
                 continue
+
+            if bot is None:
+                bot = _init_bot(simulations, syzygy_path, checkpoint=checkpoint_path)
 
             time_budget = _compute_time_budget(line, board.turn)
 

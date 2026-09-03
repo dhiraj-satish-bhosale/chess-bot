@@ -147,7 +147,7 @@ def main():
         description="Play chess against the AlphaZero bot"
     )
     parser.add_argument("--checkpoint", type=str,
-                        default="models/checkpoints/alphazero_best.pt")
+                        default="models/checkpoints/alphazero_distilled.pt")
     parser.add_argument("--human_color", type=str, default="white",
                         choices=["white", "black"])
     parser.add_argument("--fen", type=str, default=None)

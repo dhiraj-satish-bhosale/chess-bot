@@ -13,7 +13,13 @@ import argparse
 import csv
 import math
 import os
+import sys
 import time
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 import numpy as np
 import chess
 import torch
@@ -24,12 +30,15 @@ from engine.board_encoder import encode_board_v2
 from engine.move_encoding import policy_to_move_probs
 
 
-def sample_bracketed_puzzles(csv_path: str, samples_per_bin: int = 100, skip_rows: int = 0):
+import itertools
+
+
+def sample_bracketed_puzzles(csv_path: str, samples_per_bin: int = 100, seek_mb: int = 350):
     """Samples puzzles uniformly across Elo brackets from 1000 to 2600.
     
     Args:
-        skip_rows: Skips the first N rows (e.g. 1,000,000) to guarantee
-                   evaluating strictly on unseen test data.
+        seek_mb: Seeks N megabytes into the file (e.g. 350MB) to guarantee
+                 evaluating strictly on unseen test data instantly.
     """
     bins = {
         "1000-1200": {"min": 1000, "max": 1200, "puzzles": []},
@@ -42,17 +51,20 @@ def sample_bracketed_puzzles(csv_path: str, samples_per_bin: int = 100, skip_row
         "2400-2600": {"min": 2400, "max": 2600, "puzzles": []},
     }
 
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        header = next(reader, None)
-        for row_idx, row in enumerate(reader):
-            if row_idx < skip_rows:
+    with open(csv_path, "r", encoding="utf-8", buffering=8*1024*1024) as f:
+        if seek_mb > 0:
+            f.seek(seek_mb * 1024 * 1024)
+            f.readline()  # discard partial line
+        for idx, line in enumerate(f):
+            if idx >= 150000:
+                break
+            parts = line.strip().split(",")
+            if len(parts) < 4:
                 continue
-
             try:
-                fen = row[1]
-                moves_str = row[2]
-                rating = int(row[3])
+                fen = parts[1]
+                moves_str = parts[2]
+                rating = int(parts[3])
             except (IndexError, ValueError):
                 continue
 
@@ -73,19 +85,20 @@ def sample_bracketed_puzzles(csv_path: str, samples_per_bin: int = 100, skip_row
     return bins
 
 
-def evaluate_elo(checkpoint_path: str, csv_path: str, simulations: int = 100, policy_only: bool = False, samples_per_bin: int = 75, skip_rows: int = 1000000):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Loading checkpoint: {checkpoint_path} on {device}...")
-    net = load_model(checkpoint_path, device, output_policy=True)
-    mcts = MCTS(net, device=device, c_puct=2.5) if not policy_only else None
+def evaluate_elo(checkpoint_path: str, csv_path: str, simulations: int = 100, policy_only: bool = False, samples_per_bin: int = 75, seek_mb: int = 350, device: str = None):
+    dev = torch.device(device) if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Loading checkpoint: {checkpoint_path} on {dev}...", flush=True)
+    net = load_model(checkpoint_path, dev, output_policy=True)
+    net.eval()
+    mcts = MCTS(net, device=dev, c_puct=2.5) if not policy_only else None
 
-    print(f"Sampling 100% UNSEEN benchmark puzzles (skipping first {skip_rows:,} training rows)...")
-    bins = sample_bracketed_puzzles(csv_path, samples_per_bin=samples_per_bin, skip_rows=skip_rows)
+    print(f"Sampling 100% UNSEEN benchmark puzzles (seeking {seek_mb}MB into test data)...", flush=True)
+    bins = sample_bracketed_puzzles(csv_path, samples_per_bin=samples_per_bin, seek_mb=seek_mb)
 
-    print("\n" + "=" * 65)
-    mode_str = "Policy-Only (0 MCTS)" if policy_only else f"MCTS (simulations={simulations})"
-    print(f"  ACCURATE ELO BENCHMARK TEST  [{mode_str}]")
-    print("=" * 65)
+    print("\n" + "=" * 65, flush=True)
+    mode_str = "Policy-Only (Raw Neural Network Intuition)" if policy_only else f"MCTS (Search + Lookahead, sims={simulations})"
+    print(f"  ACCURATE ELO BENCHMARK TEST  [{mode_str}]", flush=True)
+    print("=" * 65, flush=True)
 
     all_ratings = []
     all_scores = []
@@ -101,42 +114,67 @@ def evaluate_elo(checkpoint_path: str, csv_path: str, simulations: int = 100, po
         correct = 0
         total = len(puzzles)
 
-        for fen, moves, rating in puzzles:
-            board = chess.Board(fen)
-            setup_move = chess.Move.from_uci(moves[0])
-            if setup_move not in board.legal_moves:
-                continue
-            board.push(setup_move)
+        if policy_only:
+            # Batch evaluate on GPU
+            boards = []
+            targets = []
+            ratings = []
+            for fen, moves, rating in puzzles:
+                board = chess.Board(fen)
+                setup_move = chess.Move.from_uci(moves[0])
+                if setup_move not in board.legal_moves:
+                    continue
+                board.push(setup_move)
+                target_move = chess.Move.from_uci(moves[1])
+                boards.append(board)
+                targets.append(target_move)
+                ratings.append(rating)
 
-            target_move = chess.Move.from_uci(moves[1])
+            if boards:
+                batch_size = 16
+                logits_list = []
+                for b_idx in range(0, len(boards), batch_size):
+                    chunk = boards[b_idx:b_idx + batch_size]
+                    encoded = np.stack([encode_board_v2(b) for b in chunk], axis=0)
+                    tensor = torch.from_numpy(encoded).float().to(device)
+                    with torch.no_grad():
+                        p_logits, _ = net(tensor)
+                    logits_list.append(p_logits.cpu().numpy())
+                policy_logits_np = np.concatenate(logits_list, axis=0)
 
-            if policy_only:
-                # Direct neural network policy argmax
-                x = torch.from_numpy(encode_board_v2(board)).unsqueeze(0).to(device).float()
-                with torch.no_grad():
-                    p_logits, _ = net(x)
-                p_dist = policy_to_move_probs(p_logits.squeeze(0).cpu().numpy(), board)
-                if p_dist:
-                    bot_move = max(p_dist, key=lambda item: item[1])[0]
-                else:
-                    bot_move = None
-            else:
-                # MCTS search
+                for i, board in enumerate(boards):
+                    p_dist = policy_to_move_probs(policy_logits_np[i], board)
+                    bot_move = max(p_dist, key=lambda item: item[1])[0] if p_dist else None
+                    if bot_move == targets[i]:
+                        correct += 1
+                        all_scores.append(1.0)
+                    else:
+                        all_scores.append(0.0)
+                    all_ratings.append(ratings[i])
+        else:
+            for fen, moves, rating in puzzles:
+                board = chess.Board(fen)
+                setup_move = chess.Move.from_uci(moves[0])
+                if setup_move not in board.legal_moves:
+                    continue
+                board.push(setup_move)
+
+                target_move = chess.Move.from_uci(moves[1])
                 root = mcts.search(board, num_simulations=simulations, add_noise=False)
                 bot_move = mcts.select_move(root, temperature=0.0)
 
-            if bot_move == target_move:
-                correct += 1
-                all_scores.append(1.0)
-            else:
-                all_scores.append(0.0)
-            all_ratings.append(rating)
+                if bot_move == target_move:
+                    correct += 1
+                    all_scores.append(1.0)
+                else:
+                    all_scores.append(0.0)
+                all_ratings.append(rating)
 
         accuracy = correct / max(1, total)
         bin_mid = (bin_data["min"] + bin_data["max"]) // 2
         bin_results[bin_name] = {"acc": accuracy, "correct": correct, "total": total, "mid": bin_mid}
 
-        print(f"  Elo {bin_name:9s} : {correct:3d}/{total:3d} solved  ({accuracy:6.2%})")
+        print(f"  Elo {bin_name:9s} : {correct:3d}/{total:3d} solved  ({accuracy:6.2%})", flush=True)
 
     # Elo Estimation using Logistic Fit (Performance Rating)
     # Expected score formula: E = 1 / (1 + 10^((R_opponent - R_bot)/400))
@@ -174,9 +212,10 @@ if __name__ == "__main__":
     parser.add_argument("--csv", type=str, default="data/lichess_db_puzzle.csv")
     parser.add_argument("--simulations", type=int, default=150)
     parser.add_argument("--policy-only", action="store_true")
-    parser.add_argument("--samples-per-bin", type=int, default=60)
-    parser.add_argument("--skip-rows", type=int, default=1500000,
-                        help="Skip first N rows to evaluate on completely unseen puzzles")
+    parser.add_argument("--samples-per-bin", type=int, default=50)
+    parser.add_argument("--seek-mb", type=int, default=350,
+                        help="Seek N megabytes into file to evaluate on completely unseen puzzles")
+    parser.add_argument("--device", type=str, default=None, help="Device to run on (cuda or cpu)")
     args = parser.parse_args()
 
     evaluate_elo(
@@ -185,5 +224,6 @@ if __name__ == "__main__":
         simulations=args.simulations,
         policy_only=args.policy_only,
         samples_per_bin=args.samples_per_bin,
-        skip_rows=args.skip_rows,
+        seek_mb=args.seek_mb,
+        device=args.device,
     )
